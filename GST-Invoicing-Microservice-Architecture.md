@@ -101,7 +101,7 @@
 ### **Existing Tables (Already in Your PostgreSQL)**
 
 ```sql
--- ✅ You already have these tables - NO CHANGES NEEDED
+-- ✅ we already have these tables - NO CHANGES NEEDED
 
 -- partners table (existing)
 -- Stores partner master data
@@ -297,155 +297,16 @@ CREATE TABLE bank_file_log (
 
 ✅ **GST Eligibility**: Determined ONLY by `reason_for_payment` (category is for grouping only)
 ✅ **GST Base Amount**: Sum of gross payout amounts **BEFORE TDS deduction**
-✅ **TDS is NOT considered** in GST calculation
 
 ---
 
-### **Step 1: Fetch Eligible Payout Records**
-
-```javascript
-// Query your existing payout_calculation table
-// Join with reason_payment_mapping to filter eligible records
-async function getEligiblePayouts(destinationId, month) {
-  const query = `
-    SELECT
-      pc.category,
-      pc.reason_for_payment,
-      pc.effective_payout_base,
-      pc.financial_year
-    FROM payout_calculation pc
-    INNER JOIN reason_payment_mapping rpm
-      ON pc.category = rpm.category
-      AND pc.reason_for_payment = rpm.reason_for_payment
-    WHERE pc.destination_id = $1
-      AND pc.month = $2
-      AND rpm.is_eligible_for_gst = TRUE
-      AND rpm.is_active = TRUE
-  `;
-
-  return await db.query(query, [destinationId, month]);
-}
-```
+### **Step 1: Fetch Eligible Payout Records*
 
 ### **Step 2: Aggregate by Category (Trail vs Upfront)**
 
-```javascript
-async function aggregatePayoutsByCategory(destinationId, month) {
-  const eligiblePayouts = await getEligiblePayouts(destinationId, month);
-
-  if (eligiblePayouts.length === 0) {
-    throw new Error('No eligible payouts found for GST invoice');
-  }
-
-  let trail = {
-    gross: 0,      // Sum of gross amounts BEFORE TDS
-    count: 0       // Number of trail payout records
-  };
-
-  let upfront = {
-    gross: 0,      // Sum of gross amounts BEFORE TDS
-    count: 0       // Number of upfront payout records
-  };
-
-  let financialYear = eligiblePayouts[0].financial_year;
-
-  for (const payout of eligiblePayouts) {
-    // ✅ Use effective_payout_base as gross amount (before TDS)
-    const grossAmount = parseFloat(payout.effective_payout_base);
-
-    if (payout.category === 'trail') {
-      trail.gross += grossAmount;
-      trail.count++;
-    } else if (payout.category === 'upfront') {
-      upfront.gross += grossAmount;
-      upfront.count++;
-    }
-  }
-
-  return {
-    trail: trail,
-    upfront: upfront,
-    financialYear: financialYear
-  };
-}
-```
-
 ### **Step 3: Calculate GST Base Amount**
 
-```javascript
-function calculateGSTBase(trail, upfront) {
-  // ✅ GST Base = Direct sum of gross amounts (before TDS)
-  // ✅ NO TDS calculation involved
-
-  const trailBase = trail.gross;
-  const upfrontBase = upfront.gross;
-  const totalGSTBase = trailBase + upfrontBase;
-
-  return {
-    trailBase: trailBase,
-    upfrontBase: upfrontBase,
-    totalGSTBase: totalGSTBase
-  };
-}
-```
-
 ### **Step 4: Calculate GST @ 18%**
-
-```javascript
-async function calculateGST(gstBase, destinationId) {
-  const GST_RATE = 0.18;
-  const gstAmount = gstBase * GST_RATE;
-
-  // Fetch partner state from existing partners table
-  const partner = await db.query(
-    'SELECT state FROM partners WHERE destination_id = $1',
-    [destinationId]
-  );
-
-  const companyState = 'Maharashtra';  // Your company's state
-  const isSameState = partner[0].state === companyState;
-
-  return {
-    gstAmount: gstAmount,
-    cgst: isSameState ? gstAmount / 2 : 0,  // 9%
-    sgst: isSameState ? gstAmount / 2 : 0,  // 9%
-    igst: isSameState ? 0 : gstAmount        // 18%
-  };
-}
-```
-
-### **Complete Calculation Function**
-
-```javascript
-async function calculateInvoiceAmounts(destinationId, month) {
-  // Step 1 & 2: Aggregate eligible payouts by category
-  const { trail, upfront, financialYear } = await aggregatePayoutsByCategory(
-    destinationId,
-    month
-  );
-
-  // Step 3: Calculate GST base (sum of gross amounts)
-  const gstBase = calculateGSTBase(trail, upfront);
-
-  // Step 4: Calculate GST @ 18%
-  const gst = await calculateGST(gstBase.totalGSTBase, destinationId);
-
-  return {
-    trail: {
-      gross: trail.gross,
-      count: trail.count
-    },
-    upfront: {
-      gross: upfront.gross,
-      count: upfront.count
-    },
-    gstBase: gstBase.totalGSTBase,
-    gst: gst,
-    totalInvoiceAmount: gstBase.totalGSTBase + gst.gstAmount,
-    financialYear: financialYear
-  };
-}
-```
 
 ### **Example Calculation**
 
@@ -564,41 +425,9 @@ GET /api/partner/:destination_id/invoice/:month/data
 
   // Additional data for CGST/IGST logic
   state: "Maharashtra",                     // ✅ From partners table
-  trailAmount: 80000.00,                    // ✅ Optional: for breakdown
-  upfrontAmount: 50000.00                   // ✅ Optional: for breakdown
 }
 ```
 
-### **Frontend Flow:**
-
-```javascript
-// Step 1: Fetch invoice data
-const response = await fetch(`/api/partner/${destinationId}/invoice/${month}/data`);
-const data = await response.json();
-
-// Step 2: Your HTML template applies CGST/IGST logic
-const companyState = "Maharashtra";
-const isSameState = data.state === companyState;
-
-const gstAmount = data.gstBaseAmount * 0.18;
-const cgst = isSameState ? gstAmount / 2 : 0;
-const sgst = isSameState ? gstAmount / 2 : 0;
-const igst = isSameState ? 0 : gstAmount;
-
-// Step 3: Generate PDF using your existing HTML code
-const pdf = generatePDF({
-  ...data,
-  cgst,
-  sgst,
-  igst,
-  totalAmount: data.gstBaseAmount + gstAmount
-});
-
-// Step 4: Display PDF to partner
-displayPDF(pdf);
-```
-
----
 
 ## User Flows
 
@@ -1030,8 +859,6 @@ Response 200:
   "state": "Maharashtra",                        // For CGST/IGST logic
   "address": "123 Main St, Mumbai",
   "email": "rajendra@email.com",
-  "trailAmount": 80000.00,                       // Optional: for breakdown
-  "upfrontAmount": 50000.00,                     // Optional: for breakdown
 
   // Status
   "status": "generated",
@@ -1377,116 +1204,6 @@ Partners can view:
 - Payment Status
 ```
 
-### **Reconciliation Logic (Pseudocode)**
-
-```javascript
-async function reconcilePayments(settlementFile, bankFileId) {
-  const settlements = parseCSV(settlementFile);
-
-  const results = {
-    successful: [],
-    failed: [],
-    unmatched: []
-  };
-
-  for (const row of settlements) {
-    const { invoice_id, utr_number, amount, payment_date, status, remarks } = row;
-
-    // Find invoice by invoice_id (KEY IDENTIFIER)
-    const invoice = await db.query(
-      'SELECT * FROM invoices WHERE invoice_id = $1',
-      [invoice_id]
-    );
-
-    if (!invoice) {
-      // Invoice not found - unmatched record
-      results.unmatched.push({
-        invoice_id,
-        utr_number,
-        amount,
-        reason: 'Invoice ID not found in system'
-      });
-      continue;
-    }
-
-    // Validate amount matches
-    if (parseFloat(amount) !== parseFloat(invoice.gst_amount)) {
-      results.unmatched.push({
-        invoice_id,
-        utr_number,
-        amount,
-        expectedAmount: invoice.gst_amount,
-        reason: 'Amount mismatch'
-      });
-      continue;
-    }
-
-    // Update invoice with settlement details
-    const updateQuery = `
-      UPDATE invoices
-      SET
-        utr_number = $1,
-        payment_date = $2,
-        payment_status = $3,
-        payment_failure_reason = $4,
-        status = CASE
-          WHEN $3 = 'SUCCESS' THEN 'paid'
-          WHEN $3 = 'FAILED' THEN 'failed'
-          ELSE status
-        END,
-        updated_at = NOW()
-      WHERE invoice_id = $5
-      RETURNING *
-    `;
-
-    const updatedInvoice = await db.query(updateQuery, [
-      utr_number,
-      payment_date,
-      status,
-      status === 'FAILED' ? remarks : null,
-      invoice_id
-    ]);
-
-    // Categorize result
-    if (status === 'SUCCESS') {
-      results.successful.push({
-        invoice_id,
-        invoice_number: invoice.invoice_number,
-        destination_id: invoice.destination_id,
-        utr_number,
-        amount,
-        payment_date
-      });
-    } else {
-      results.failed.push({
-        invoice_id,
-        invoice_number: invoice.invoice_number,
-        destination_id: invoice.destination_id,
-        amount,
-        failure_reason: remarks
-      });
-    }
-  }
-
-  // Save reconciliation record
-  const reconciliation = await saveReconciliation({
-    bank_file_id: bankFileId,
-    processed_at: new Date(),
-    summary: {
-      total: settlements.length,
-      successful: results.successful.length,
-      failed: results.failed.length,
-      unmatched: results.unmatched.length
-    }
-  });
-
-  return {
-    reconciliation_id: reconciliation.id,
-    summary: reconciliation.summary,
-    details: results
-  };
-}
-```
 
 ### **Edge Cases Handled**
 
